@@ -1,0 +1,2 @@
+-r TIM/requirements.txt
+pytest>=8.0

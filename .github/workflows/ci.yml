@@ -1,0 +1,34 @@
+name: EvoEdit static checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Compile edited Python files
+        run: |
+          python -m py_compile \
+            train.py \
+            configs/config.py \
+            models/model_evoedit.py \
+            models/evoedit/constants.py \
+            models/evoedit/targets.py \
+            models/evoedit/program.py \
+            models/evoedit/losses.py \
+            models/evoedit/copy.py \
+            models/evoedit/model_core.py \
+            models/evoedit/model_training.py \
+            models/evoedit/model_generation.py
+      - name: Check shell syntax
+        run: |
+          bash -n scripts/evoedit_train.sh
+          bash -n scripts/evoedit_test.sh
