@@ -3,10 +3,10 @@ __pycache__/
 *.so
 *.egg-info/
 .pytest_cache/
-.venv/
+.venv
 env/
-pretrain_weights/
-dataset/mimic-cxr/
+pretrain_weights
+dataset/mimic-cxr
 save/
 outputs/
 *.pth

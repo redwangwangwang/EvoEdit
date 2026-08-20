@@ -24,6 +24,12 @@ parser.add_argument("--validate", action="store_true", help="only run the valida
 parser.add_argument("--dataset", type=str, default="longitudinal-mimic")
 parser.add_argument("--annotation", type=str, default="./dataset/mimic-cxr/annotation.json")
 parser.add_argument("--base_dir", type=str, default="./dataset/mimic-cxr/")
+parser.add_argument(
+    "--allow_missing_progressions",
+    default=False,
+    type=str2bool,
+    help="allow the non-paper fallback text when progression descriptions are absent",
+)
 parser.add_argument("--batch_size", default=2, type=int)
 parser.add_argument("--val_batch_size", default=4, type=int)
 parser.add_argument("--test_batch_size", default=4, type=int)
