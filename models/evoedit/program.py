@@ -21,6 +21,7 @@ class CorrespondenceOutput:
 
 @dataclass
 class EditProgramOutput:
+    change_slots: torch.Tensor
     content_slots: torch.Tensor
     program_slots: torch.Tensor
     operation_logits: torch.Tensor
@@ -60,7 +61,11 @@ class SoftTemporalCorrespondence(nn.Module):
             nn.LayerNorm(hidden_size),
         )
 
-    def forward(self, previous_tokens: torch.Tensor, current_tokens: torch.Tensor) -> CorrespondenceOutput:
+    def forward(
+        self,
+        previous_tokens: torch.Tensor,
+        current_tokens: torch.Tensor,
+    ) -> CorrespondenceOutput:
         if previous_tokens.ndim != 3 or current_tokens.ndim != 3:
             raise ValueError("Visual tokens must have shape [batch, tokens, hidden].")
         if previous_tokens.shape[0] != current_tokens.shape[0]:
@@ -121,6 +126,7 @@ class FactorizedEditProgram(nn.Module):
             batch_first=True,
         )
         self.query_norm = nn.LayerNorm(hidden_size)
+        self.change_norm = nn.LayerNorm(hidden_size)
         self.output_norm = nn.LayerNorm(hidden_size)
         self.content_ffn = nn.Sequential(
             nn.Linear(hidden_size, hidden_size * 2),
@@ -139,7 +145,10 @@ class FactorizedEditProgram(nn.Module):
         self.composition_norm = nn.LayerNorm(hidden_size)
 
     @staticmethod
-    def _expected_embedding(probabilities: torch.Tensor, codebook: nn.Embedding) -> torch.Tensor:
+    def _expected_embedding(
+        probabilities: torch.Tensor,
+        codebook: nn.Embedding,
+    ) -> torch.Tensor:
         return probabilities @ codebook.weight
 
     def compose(
@@ -167,18 +176,28 @@ class FactorizedEditProgram(nn.Module):
             need_weights=True,
             average_attn_weights=False,
         )
+        # This residual excludes the shared finding query and is therefore used
+        # for cycle consistency instead of the trivially similar content slot.
+        change_slots = self.change_norm(attended)
         content_slots = self.output_norm(queries + attended)
         content_slots = self.output_norm(content_slots + self.content_ffn(content_slots))
 
         operation_logits = self.operation_head(content_slots)
         anatomy_logits = self.anatomy_head(content_slots)
         severity_logits = self.severity_head(content_slots)
-        operation_probs = F.softmax(operation_logits / self.temperature, dim=-1)
+        temperature = max(float(self.temperature), 1e-4)
+        operation_probs = F.softmax(operation_logits / temperature, dim=-1)
         anatomy_probs = F.softmax(anatomy_logits, dim=-1)
         severity_probs = F.softmax(severity_logits, dim=-1)
         confidence = torch.sigmoid(self.confidence_head(content_slots))
-        program_slots = self.compose(content_slots, operation_probs, anatomy_probs, severity_probs)
+        program_slots = self.compose(
+            content_slots,
+            operation_probs,
+            anatomy_probs,
+            severity_probs,
+        )
         return EditProgramOutput(
+            change_slots=change_slots,
             content_slots=content_slots,
             program_slots=program_slots,
             operation_logits=operation_logits,
@@ -210,6 +229,7 @@ class CopyAndEditExecutor(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size, 1),
         )
+        nn.init.zeros_(self.gate[-1].bias)
         self.output_norm = nn.LayerNorm(hidden_size)
 
     def forward(
@@ -231,10 +251,19 @@ class CopyAndEditExecutor(nn.Module):
             average_attn_weights=False,
         )
         keep_probability = operation_probs[..., int(EditOperation.KEEP)].unsqueeze(-1)
-        learned_gate = torch.sigmoid(
-            self.gate(torch.cat([program_slots, prior_facts, keep_probability, confidence], dim=-1))
+        # The operation probability remains available as a semantic hint, but
+        # it is detached from the gate path so report/copy gradients cannot
+        # make all-KEEP a shortcut through the preservation gate.
+        gate_features = torch.cat(
+            [
+                program_slots,
+                prior_facts,
+                keep_probability.detach(),
+                confidence.detach(),
+            ],
+            dim=-1,
         )
-        preserve_gate = 0.5 * learned_gate + 0.5 * keep_probability
+        preserve_gate = torch.sigmoid(self.gate(gate_features))
         executed = preserve_gate * prior_facts + (1.0 - preserve_gate) * program_slots
-        executed = self.output_norm(executed + program_slots)
+        executed = self.output_norm(executed)
         return ExecutorOutput(executed, prior_facts, preserve_gate, attention)

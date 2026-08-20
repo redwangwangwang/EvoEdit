@@ -81,6 +81,29 @@ FINDING_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 
+APPEAR_WORDS: Final[tuple[str, ...]] = (
+    "new ",
+    "newly ",
+    "interval development",
+    "interval appearance",
+    "has developed",
+    "now seen",
+    "now present",
+    "interval placement",
+    "has been placed",
+)
+
+RESOLVE_WORDS: Final[tuple[str, ...]] = (
+    "resolved",
+    "resolution",
+    "has cleared",
+    "cleared",
+    "no longer seen",
+    "no longer present",
+    "interval removal",
+    "has been removed",
+)
+
 WORSEN_WORDS: Final[tuple[str, ...]] = (
     "worsen",
     "worsened",

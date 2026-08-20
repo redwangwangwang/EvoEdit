@@ -29,7 +29,8 @@ class EvoEditCore(TIMStage1):
         super().__init__(args)
         hidden_size = self.llama_model.config.hidden_size
         self.temporal_correspondence = SoftTemporalCorrespondence(
-            hidden_size, dropout=args.evoedit_dropout
+            hidden_size,
+            dropout=args.evoedit_dropout,
         )
         self.edit_program = FactorizedEditProgram(
             hidden_size=hidden_size,
@@ -48,17 +49,56 @@ class EvoEditCore(TIMStage1):
         )
         self.program_verifier = nn.Linear(hidden_size, len(OPERATION_NAMES))
         self.pointer_copy = PointerCopyHead(hidden_size)
+
+        # Keep the language-side interface identical to TIM Stage I. The
+        # executable edit program replaces TIM's progression embedding at the
+        # special token, but no extra instruction style is introduced.
         self.prompt = (
-            "You are a radiologist. Update the prior report using only changes "
-            "supported by the current chest X-ray and executable clinical edit program. "
-            "Preserve clinically stable facts and avoid unnecessary rewriting."
+            "You are a radiologist. Generate a comprehensive and detailed "
+            "diagnosis report for the chest xray image based on report of prior "
+            "image and progression between prior and current image."
         )
         self.prompt_prior = (
-            "You are a radiologist. Reconstruct the prior report from the later report, "
-            "the prior image, and the inverse clinical edit program."
+            "You are a radiologist. Here is a chest X-ray image, along with the "
+            "progressions compared to subsequent image. Please generate a "
+            "comprehensive and detailed diagnosis report for this image."
         )
         self.val_edit_outputs: list[dict[str, Any]] = []
         self.test_edit_outputs: list[dict[str, Any]] = []
+        self._freeze_reference_modules(args)
+
+    def _freeze_reference_modules(self, args: Any) -> None:
+        """Keep frozen TIM/clinical encoders deterministic during training."""
+
+        if not args.llm_use_lora:
+            for parameter in self.llama_model.parameters():
+                parameter.requires_grad = False
+            for parameter in self.embed_tokens.parameters():
+                parameter.requires_grad = False
+            self.llama_model.eval()
+            self.embed_tokens.eval()
+
+        for parameter in self.text_encoder.parameters():
+            parameter.requires_grad = False
+        self.text_encoder.eval()
+
+        chexbert = self.chexbert_metrics.chexbert
+        for parameter in chexbert.parameters():
+            parameter.requires_grad = False
+        chexbert.eval()
+
+    def train(self, mode: bool = True):
+        """Preserve eval mode for frozen teachers while training EvoEdit."""
+
+        super().train(mode)
+        self.text_encoder.eval()
+        self.chexbert_metrics.chexbert.eval()
+        if not self.hparams.llm_use_lora:
+            self.llama_model.eval()
+            self.embed_tokens.eval()
+        if self.hparams.freeze_vm:
+            self.visual_encoder.eval()
+        return self
 
     def _encode_pair(self, samples: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
         previous = self.layer_norm(self.encode_img(samples["prev_image"]))
@@ -93,7 +133,8 @@ class EvoEditCore(TIMStage1):
         change = self.temporal_correspondence(source_visual, target_visual).change_tokens
         program = self.edit_program(change)
         token_ids, token_embeddings, token_mask = self._encode_report_context(
-            source_reports, source_visual.device
+            source_reports,
+            source_visual.device,
         )
         execution = self.edit_executor(
             program.program_slots,
@@ -111,11 +152,10 @@ class EvoEditCore(TIMStage1):
         context: Sequence[str],
         timepoint: str = "curr",
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Replace TIM placeholders with image tokens and edit-program slots."""
+        """Use TIM's prompt format with executable edit slots at Progression."""
 
         device = image_embed.device
         instruction = self.prompt if timepoint == "curr" else self.prompt_prior
-        relation = "Prior report" if timepoint == "curr" else "Later report"
         context_tokens = self.llama_tokenizer(
             list(context),
             return_tensors="pt",
@@ -129,15 +169,15 @@ class EvoEditCore(TIMStage1):
             add_special_tokens=False,
             skip_special_tokens=True,
         )
-        prompts = [
-            f"User: Image: <Image>. Clinical edit program: <Progression>. "
-            f"{relation}: {report}. {instruction}\nAssistant:"
-            for report in clipped
-        ]
+        template = (
+            "User: Progression: <Progression>. Context report: <Context>. "
+            f"Image: <Image>. {instruction} \n Assistant:"
+        )
+        prompts = [template.replace("<Context>", report) for report in clipped]
         tokens = self.llama_tokenizer(
             prompts,
             return_tensors="pt",
-            padding="longest",
+            padding="max_length",
             truncation=True,
             max_length=self.hparams.prompt_max_length,
             add_special_tokens=False,
@@ -149,14 +189,16 @@ class EvoEditCore(TIMStage1):
 
         for batch_index in range(image_embed.shape[0]):
             image_pos = torch.nonzero(
-                input_ids[batch_index].eq(self.image_token_id), as_tuple=False
+                input_ids[batch_index].eq(self.image_token_id),
+                as_tuple=False,
             ).flatten()
             edit_pos = torch.nonzero(
-                input_ids[batch_index].eq(self.progression_token_id), as_tuple=False
+                input_ids[batch_index].eq(self.progression_token_id),
+                as_tuple=False,
             ).flatten()
             if image_pos.numel() != 1 or edit_pos.numel() != 1:
                 raise RuntimeError(
-                    "Prompt lost <Image>/<Progression>; increase --prompt_max_length."
+                    "TIM prompt lost <Image>/<Progression>; increase --prompt_max_length."
                 )
             replacements = sorted(
                 [
@@ -196,7 +238,9 @@ class EvoEditCore(TIMStage1):
         device = prompt_embeddings.device
         reports = [report + self.end_sym for report in target_reports]
         target_tokens, target_embeddings, targets = self.training_input_generate(
-            reports, prompt_attention.shape[1], device
+            reports,
+            prompt_attention.shape[1],
+            device,
         )
         batch_size = prompt_embeddings.shape[0]
         bos = torch.full(
@@ -206,7 +250,8 @@ class EvoEditCore(TIMStage1):
             device=device,
         )
         inputs = torch.cat(
-            [self.embed_tokens(bos), prompt_embeddings, target_embeddings], dim=1
+            [self.embed_tokens(bos), prompt_embeddings, target_embeddings],
+            dim=1,
         )
         attention = torch.cat(
             [
@@ -252,12 +297,17 @@ class EvoEditCore(TIMStage1):
         valid = non_keep.any(dim=1)
         if not valid.any():
             return program.program_slots.sum() * 0.0
+
         scores = torch.rand_like(targets, dtype=program.operation_probs.dtype)
         selected = scores.masked_fill(~non_keep, -1.0).argmax(dim=1)
         batch = torch.arange(targets.shape[0], device=targets.device)
         probabilities = program.operation_probs.clone()
         probabilities[batch[valid], selected[valid]] = 0.0
-        probabilities[batch[valid], selected[valid], int(EditOperation.KEEP)] = 1.0
+        probabilities[
+            batch[valid],
+            selected[valid],
+            int(EditOperation.KEEP),
+        ] = 1.0
         slots = self.edit_program.compose(
             program.content_slots,
             probabilities,
@@ -265,12 +315,19 @@ class EvoEditCore(TIMStage1):
             program.severity_probs,
         )
         execution = self.edit_executor(
-            slots, probabilities, program.confidence, token_embeddings, token_mask
+            slots,
+            probabilities,
+            program.confidence,
+            token_embeddings,
+            token_mask,
         )
         intervention_targets = targets.clone()
         intervention_targets[batch[valid], selected[valid]] = int(EditOperation.KEEP)
+        valid_slots = non_keep.clone()
+        valid_slots[batch[valid], selected[valid]] = True
         return masked_intervention_loss(
             self.program_verifier(execution.executed_slots),
             intervention_targets,
-            valid,
+            valid_slots,
+            class_weights=self.hparams.operation_class_weights,
         )

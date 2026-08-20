@@ -42,5 +42,11 @@ mkdir -p "${SAVE_PATH}"
   --num_workers "${NUM_WORKERS:-8}" \
   --strategy "${STRATEGY:-auto}" \
   --precision "${PRECISION:-bf16-mixed}" \
+  --max_length "${MAX_LENGTH:-150}" \
+  --min_new_tokens "${MIN_NEW_TOKENS:-80}" \
+  --max_new_tokens "${MAX_NEW_TOKENS:-150}" \
+  --repetition_penalty "${REPETITION_PENALTY:-2.0}" \
+  --length_penalty "${LENGTH_PENALTY:-2.0}" \
   --allow_missing_progressions "${ALLOW_MISSING_PROGRESSIONS}" \
+  "$@" \
   2>&1 | tee -a "${SAVE_PATH}/test.log"

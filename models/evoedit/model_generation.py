@@ -40,10 +40,14 @@ class EvoEditGenerationMixin:
                         "finding": finding,
                         "operation": OPERATION_NAMES[operation],
                         "anatomy_code": self._safe_code_name(
-                            ANATOMY_CODE_NAMES, anatomy, "anatomy"
+                            ANATOMY_CODE_NAMES,
+                            anatomy,
+                            "anatomy",
                         ),
                         "severity_code": self._safe_code_name(
-                            SEVERITY_CODE_NAMES, severity, "severity"
+                            SEVERITY_CODE_NAMES,
+                            severity,
+                            "severity",
                         ),
                         "confidence": round(float(confidence[batch_index, finding_index]), 6),
                         "preserve_gate": round(float(preserve[batch_index, finding_index]), 6),
@@ -64,10 +68,15 @@ class EvoEditGenerationMixin:
         )
         previous_visual, current_visual = self._encode_pair(samples)
         program, execution, _, _, _ = self._build_direction(
-            previous_visual, current_visual, samples["prev_text"]
+            previous_visual,
+            current_visual,
+            samples["prev_text"],
         )
         prompt, prompt_mask = self.prompt_wrap(
-            current_visual, execution.executed_slots, samples["prev_text"], "curr"
+            current_visual,
+            execution.executed_slots,
+            samples["prev_text"],
+            "curr",
         )
         batch_size = current_visual.shape[0]
         bos = torch.full(
@@ -88,21 +97,20 @@ class EvoEditGenerationMixin:
             ],
             dim=1,
         )
-        temperature = self.hparams.temperature if self.hparams.temperature > 0 else None
+        # Match TIM Stage I decoding exactly. EvoEdit changes the method prefix,
+        # not the beam-search policy or generation length.
         outputs = self.llama_model.generate(
             inputs_embeds=inputs,
             attention_mask=attention,
             pad_token_id=self.llama_tokenizer.pad_token_id,
             num_beams=self.hparams.beam_size,
-            num_beam_groups=self.hparams.num_beam_groups,
             do_sample=self.hparams.do_sample,
-            no_repeat_ngram_size=self.hparams.no_repeat_ngram_size,
             min_new_tokens=self.hparams.min_new_tokens,
             max_new_tokens=self.hparams.max_new_tokens,
             repetition_penalty=self.hparams.repetition_penalty,
             length_penalty=self.hparams.length_penalty,
-            diversity_penalty=self.hparams.diversity_penalty,
-            temperature=temperature,
+            temperature=None,
+            top_p=None,
         )
         hypotheses = [self.decode(output) for output in outputs]
         references = [self.decode(output) for output in references_tokens.input_ids]

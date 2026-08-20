@@ -27,7 +27,8 @@ jobs:
             models/evoedit/copy.py \
             models/evoedit/model_core.py \
             models/evoedit/model_training.py \
-            models/evoedit/model_generation.py
+            models/evoedit/model_generation.py \
+            tools/audit_annotation.py
       - name: Check shell syntax
         run: |
           bash -n scripts/evoedit_train.sh

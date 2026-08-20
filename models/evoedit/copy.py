@@ -30,7 +30,10 @@ class PointerCopyHead(nn.Module):
         queries = self.query(decoder_states)
         keys = self.key(prior_states)
         scores = torch.matmul(queries, keys.transpose(-1, -2)) / math.sqrt(self.hidden_size)
-        scores = scores.masked_fill(~prior_attention_mask[:, None, :].bool(), torch.finfo(scores.dtype).min)
+        scores = scores.masked_fill(
+            ~prior_attention_mask[:, None, :].bool(),
+            torch.finfo(scores.dtype).min,
+        )
         return scores.softmax(dim=-1)
 
     @staticmethod

@@ -8,10 +8,12 @@ from collections.abc import Sequence
 import torch
 
 from .constants import (
+    APPEAR_WORDS,
     FINDING_ALIASES,
     FINDINGS,
     IMPROVE_WORDS,
     INVERSE_OPERATION_INDEX,
+    RESOLVE_WORDS,
     WORSEN_WORDS,
     EditOperation,
 )
@@ -27,13 +29,15 @@ def _direction_masks(
     reports: Sequence[str],
     *,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return worsen, improve, and ambiguous masks of shape ``[B, F]``."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return appear, resolve, worsen, improve, and ambiguous masks ``[B, F]``."""
 
     batch_size = len(reports)
     num_findings = len(FINDINGS)
-    worsen = torch.zeros(batch_size, num_findings, dtype=torch.bool, device=device)
-    improve = torch.zeros_like(worsen)
+    appear = torch.zeros(batch_size, num_findings, dtype=torch.bool, device=device)
+    resolve = torch.zeros_like(appear)
+    worsen = torch.zeros_like(appear)
+    improve = torch.zeros_like(appear)
 
     for batch_index, report in enumerate(reports):
         sentences = [s.strip().lower() for s in _SENTENCE_SPLIT.split(report or "") if s.strip()]
@@ -42,11 +46,19 @@ def _direction_masks(
             for sentence in sentences:
                 if not _contains_any(sentence, aliases):
                     continue
+                appear[batch_index, finding_index] |= _contains_any(sentence, APPEAR_WORDS)
+                resolve[batch_index, finding_index] |= _contains_any(sentence, RESOLVE_WORDS)
                 worsen[batch_index, finding_index] |= _contains_any(sentence, WORSEN_WORDS)
                 improve[batch_index, finding_index] |= _contains_any(sentence, IMPROVE_WORDS)
 
-    ambiguous = worsen & improve
-    return worsen & ~ambiguous, improve & ~ambiguous, ambiguous
+    ambiguous = (appear & resolve) | (worsen & improve)
+    return (
+        appear & ~ambiguous,
+        resolve & ~ambiguous,
+        worsen & ~ambiguous,
+        improve & ~ambiguous,
+        ambiguous,
+    )
 
 
 def build_operation_targets(
@@ -54,10 +66,12 @@ def build_operation_targets(
     current_labels: torch.Tensor,
     current_reports: Sequence[str],
 ) -> torch.Tensor:
-    """Create weak operation targets without adding or rewriting annotations.
+    """Create conservative weak operation targets without rewriting annotations.
 
-    CheXbert labels use ``0=blank``, ``1=positive``, ``2=negative`` and
-    ``3=uncertain``. The first 13 findings are used; ``no finding`` is excluded.
+    CheXbert uses ``0=not mentioned``, ``1=positive``, ``2=negative`` and
+    ``3=uncertain``. A missing mention is *not* treated as resolution: a
+    positive finding only resolves when the current report is explicitly
+    negative or contains a finding-local resolution cue.
     """
 
     if previous_labels.ndim != 2 or current_labels.ndim != 2:
@@ -76,21 +90,42 @@ def build_operation_targets(
     targets = torch.full_like(previous, int(EditOperation.KEEP))
     previous_positive = previous.eq(1)
     current_positive = current.eq(1)
+    previous_negative = previous.eq(2)
+    current_negative = current.eq(2)
     previous_uncertain = previous.eq(3)
     current_uncertain = current.eq(3)
 
-    targets[(~previous_positive) & current_positive] = int(EditOperation.APPEAR)
-    targets[previous_positive & (~current_positive) & (~current_uncertain)] = int(EditOperation.RESOLVE)
+    appear, resolve, worsen, improve, ambiguous = _direction_masks(
+        current_reports,
+        device=device,
+    )
 
-    persistent = previous_positive & current_positive
-    worsen, improve, ambiguous = _direction_masks(current_reports, device=device)
+    certain_transition = ~(previous_uncertain | current_uncertain)
+    appearance = current_positive & (~previous_positive) & certain_transition
+    appearance |= appear & current_positive & (~previous_positive) & certain_transition
+    resolution = previous_positive & current_negative & certain_transition
+    resolution |= resolve & previous_positive & (~current_positive) & certain_transition
+
+    targets[appearance] = int(EditOperation.APPEAR)
+    targets[resolution] = int(EditOperation.RESOLVE)
+
+    persistent = previous_positive & current_positive & certain_transition
     targets[persistent & worsen] = int(EditOperation.WORSEN)
     targets[persistent & improve] = int(EditOperation.IMPROVE)
     targets[persistent & ambiguous] = int(EditOperation.UNCERTAIN)
 
+    # Conflicting explicit cues and label states are safer as UNCERTAIN than as
+    # a hard temporal direction.
+    cue_conflict = (
+        (appear & previous_positive)
+        | (resolve & current_positive)
+        | (worsen & improve)
+        | (previous_negative & current_negative & (appear | resolve))
+    )
+    targets[cue_conflict] = int(EditOperation.UNCERTAIN)
+
     uncertain_transition = previous_uncertain | current_uncertain
-    unresolved_uncertainty = uncertain_transition & targets.eq(int(EditOperation.KEEP))
-    targets[unresolved_uncertainty] = int(EditOperation.UNCERTAIN)
+    targets[uncertain_transition] = int(EditOperation.UNCERTAIN)
     return targets
 
 
